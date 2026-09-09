@@ -1,0 +1,12 @@
+# Локальный Mattermost для разработки — не имеет отношения к проду.
+# Поднять:  docker compose -f docker-compose.mattermost-dev.yml -p mmdev up -d
+# Открыть:  http://localhost:8065
+# Погасить: docker compose -f docker-compose.mattermost-dev.yml -p mmdev down -v
+#
+# Образ preview несёт свою базу внутри — отдельный Postgres не нужен.
+services:
+  mattermost:
+    image: mattermost/mattermost-preview:latest
+    ports:
+      - "127.0.0.1:8065:8065"
+    restart: unless-stopped
