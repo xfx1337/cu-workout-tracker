@@ -15,6 +15,9 @@ import sys
 
 import httpx
 
+# Пароли ниже — фикстуры одноразового контейнера, который слушает только
+# 127.0.0.1 и сносится вместе с томом. Это не секреты: боевые MM_URL и MM_TOKEN
+# живут в .env, который в репозиторий не попадает.
 URL = "http://localhost:8065"
 ADMIN = {"email": "admin@cu.local", "username": "admin", "password": "Admin12345!"}
 TEAM = {"name": "cu", "display_name": "ЦУ", "type": "O"}
@@ -113,7 +116,7 @@ def main() -> int:
     print(f"MM_URL={URL}")
     print(f"MM_TOKEN={token}")
     print(f"MM_TEAM={TEAM['name']}")
-    print(f"ADMIN_USERNAMES={ADMIN['username']}")
+    print(f"ADMIN_EMAILS={ADMIN['email']}")
     print()
     print("Веб-интерфейс: " + URL)
     print(f"  админ:   {ADMIN['username']} / {ADMIN['password']}")

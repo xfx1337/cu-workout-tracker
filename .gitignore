@@ -6,6 +6,7 @@ venv/
 *.db
 *.db-journal
 *.sqlite3
+*.tar
 exports/
 .idea/
 .vscode/

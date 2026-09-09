@@ -1,5 +1,5 @@
 ﻿# Заливка проекта на сервер с Windows. Запускать из корня проекта:
-#   powershell -ExecutionPolicy Bypass -File deploy\push.ps1 -Server root@87.120.84.226
+#   powershell -ExecutionPolicy Bypass -File deploy\push.ps1 -Server root@СЕРВЕР
 #
 # Копирует только то, что нужно в проде: код, Dockerfile, compose, requirements, .env.
 # Не тащит .venv, .git, локальную базу, логи и превью картинок.
