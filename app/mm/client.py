@@ -105,6 +105,9 @@ class MattermostClient:
             timeout=timeout,
         )
         self.me: MMUser | None = None
+        # взводится, когда websocket подключён и прошёл аутентификацию:
+        # позволяет дождаться готовности вместо угадывания паузы
+        self.connected = asyncio.Event()
         # кэш личных каналов: user_id -> channel_id, чтобы не дёргать API на каждое сообщение
         self._dm_cache: dict[str, str] = {}
 
@@ -239,6 +242,7 @@ class MattermostClient:
                         "data": {"token": self.token},
                     }))
                     log.info("websocket подключён")
+                    self.connected.set()
                     delay = 1
                     async for raw in ws:
                         event = self._parse(raw)
@@ -247,6 +251,7 @@ class MattermostClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self.connected.clear()
                 log.warning("websocket отвалился (%s), переподключаюсь через %s c", exc, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
