@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import texts
@@ -21,11 +20,11 @@ from app.services import students as students_svc
 log = logging.getLogger(__name__)
 
 
-async def _notify(bot: Bot, tg_user_id: int, text: str) -> None:
+async def _notify(bot, mm_user_id: str, text: str) -> None:
     try:
-        await bot.send_message(tg_user_id, text)
+        await bot.send_message(mm_user_id, text)
     except Exception as exc:  # заблокировал бота, удалил чат и т.п.
-        log.info("cannot notify %s: %s", tg_user_id, exc)
+        log.info("не смог написать %s: %s", mm_user_id, exc)
 
 
 async def mark_attended(session: AsyncSession, booking: Booking) -> None:
@@ -56,7 +55,7 @@ async def _revoke_strike(session: AsyncSession, booking: Booking) -> None:
 
 async def mark_no_show(
     session: AsyncSession,
-    bot: Bot,
+    bot,
     booking: Booking,
     *,
     count_strike: bool,
@@ -77,10 +76,10 @@ async def mark_no_show(
         return
 
     if just_banned:
-        await _notify(bot, student.tg_user_id, texts.AUTO_BANNED.format(limit=settings.no_show_limit))
+        await _notify(bot, student.mm_user_id, texts.AUTO_BANNED.format(limit=settings.no_show_limit))
     else:
         await _notify(
             bot,
-            student.tg_user_id,
+            student.mm_user_id,
             texts.STRIKE_WARN.format(count=count, limit=settings.no_show_limit),
         )

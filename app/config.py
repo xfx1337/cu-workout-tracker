@@ -18,16 +18,12 @@ class Settings(BaseSettings):
     mm_public_url: str = ""               # адрес нашего бота, виден серверу Mattermost
     mm_listen_port: int = 8080
 
-    # хранится строкой: pydantic-settings пытается парсить list[str] из env как JSON
-    admin_usernames_raw: str = Field(default="", validation_alias="ADMIN_USERNAMES")
+    # Админов опознаём по корпоративной почте: username в Mattermost меняется,
+    # почта — нет. Хранится строкой: pydantic-settings парсит list[str] из env как JSON.
+    admin_emails_raw: str = Field(default="", validation_alias="ADMIN_EMAILS")
 
     database_url: str = "sqlite+aiosqlite:///./workout.db"
     tz_name: str = "Europe/Moscow"
-
-    # Авторизация. Пустой auth_api_url => режим заглушки.
-    auth_api_url: str = ""
-    auth_api_token: str = ""
-    auth_login_url: str = ""
 
     default_capacity: int = 25
     reminder_minutes_before: int = 30
@@ -38,18 +34,13 @@ class Settings(BaseSettings):
     silence_counts: bool = True
 
     @property
-    def admin_usernames(self) -> list[str]:
-        return [x.strip().lstrip("@").lower() for x in self.admin_usernames_raw.split(",") if x.strip()]
+    def admin_emails(self) -> list[str]:
+        return [x.strip().lower() for x in self.admin_emails_raw.split(",") if x.strip()]
 
     @property
     def use_buttons(self) -> bool:
         """Настоящие кнопки возможны, только если Mattermost может достучаться до нас."""
         return bool(self.mm_public_url)
-
-    @property
-    def auth_is_stub(self) -> bool:
-        return not self.auth_api_url
-
 
 @lru_cache
 def get_settings() -> Settings:

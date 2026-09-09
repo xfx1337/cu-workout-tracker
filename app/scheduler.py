@@ -8,8 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from typing import Protocol
 
-from aiogram import Bot
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,7 +17,6 @@ from sqlalchemy.orm import selectinload
 from app import texts
 from app.config import settings
 from app.db import SessionMaker
-from app.keyboards import poll_kb, reminder_kb
 from app.models import Attendance, Booking, BookingStatus, Training
 from app.services import enforcement
 from app.services import trainings as trainings_svc
@@ -26,6 +25,20 @@ from app.tz import now_utc
 log = logging.getLogger(__name__)
 
 TICK_SECONDS = 60
+
+
+class Notifier(Protocol):
+    """Что планировщику нужно от мессенджера — и ничего сверх того.
+
+    Благодаря этому тик не знает ни про Mattermost, ни про реакции: в тестах
+    сюда подставляется заглушка, в бою — клиент мессенджера.
+    """
+
+    async def send_reminder(self, mm_user_id: str, text: str, training_id: int) -> None: ...
+
+    async def send_poll(self, mm_user_id: str, text: str, booking_id: int) -> None: ...
+
+    async def send_message(self, mm_user_id: str, text: str) -> None: ...
 
 
 async def _pending(session: AsyncSession, *conditions) -> list[Booking]:
@@ -42,7 +55,7 @@ async def _pending(session: AsyncSession, *conditions) -> list[Booking]:
     return list(await session.scalars(stmt))
 
 
-async def send_reminders(session: AsyncSession, bot: Bot) -> int:
+async def send_reminders(session: AsyncSession, bot: Notifier) -> int:
     now = now_utc()
     horizon = now + timedelta(minutes=settings.reminder_minutes_before)
     bookings = await _pending(
@@ -57,17 +70,17 @@ async def send_reminders(session: AsyncSession, bot: Bot) -> int:
         minutes = max(int((b.training.starts_at - now).total_seconds() // 60), 1)
         text = texts.REMINDER.format(minutes=minutes, training=trainings_svc.card(b.training))
         try:
-            await bot.send_message(b.student.tg_user_id, text, reply_markup=reminder_kb(b.training_id))
+            await bot.send_reminder(b.student.mm_user_id, text, b.training_id)
             sent += 1
         except Exception as exc:
-            log.info("reminder to %s failed: %s", b.student.tg_user_id, exc)
+            log.info("напоминание для %s не ушло: %s", b.student.mm_user_id, exc)
         b.reminder_sent_at = now
     if bookings:
         await session.commit()
     return sent
 
 
-async def send_polls(session: AsyncSession, bot: Bot) -> int:
+async def send_polls(session: AsyncSession, bot: Notifier) -> int:
     now = now_utc()
     bookings = await _pending(
         session,
@@ -81,16 +94,16 @@ async def send_polls(session: AsyncSession, bot: Bot) -> int:
             continue  # тренировка ещё идёт
         text = texts.POLL.format(training=trainings_svc.card(b.training))
         try:
-            await bot.send_message(b.student.tg_user_id, text, reply_markup=poll_kb(b.id))
+            await bot.send_poll(b.student.mm_user_id, text, b.id)
             sent += 1
         except Exception as exc:
-            log.info("poll to %s failed: %s", b.student.tg_user_id, exc)
+            log.info("опрос для %s не ушёл: %s", b.student.mm_user_id, exc)
         b.poll_sent_at = now
         await session.commit()
     return sent
 
 
-async def close_silent(session: AsyncSession, bot: Bot) -> int:
+async def close_silent(session: AsyncSession, bot: Notifier) -> int:
     """Не ответил на опрос за отведённое время — считаем пропуском."""
     if not settings.silence_counts:
         return 0
@@ -108,7 +121,7 @@ async def close_silent(session: AsyncSession, bot: Bot) -> int:
     return len(bookings)
 
 
-async def tick(bot: Bot) -> None:
+async def tick(bot: Notifier) -> None:
     async with SessionMaker() as session:
         reminders = await send_reminders(session, bot)
         polls = await send_polls(session, bot)
@@ -117,7 +130,7 @@ async def tick(bot: Bot) -> None:
         log.info("tick: reminders=%s polls=%s no_shows=%s", reminders, polls, closed)
 
 
-async def run(bot: Bot) -> None:
+async def run(bot: Notifier) -> None:
     log.info("scheduler started (tick=%ss)", TICK_SECONDS)
     while True:
         try:

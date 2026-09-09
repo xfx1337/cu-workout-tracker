@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Booking, BookingStatus, Student, Training
-from app.tz import fmt_range, now_utc, to_utc
+from app.tz import fmt_range, now_utc, to_local, to_utc
 
 
 async def create(
@@ -47,27 +47,44 @@ async def upcoming(session: AsyncSession, *, include_cancelled: bool = False, li
     return list(await session.scalars(stmt))
 
 
-async def for_week(session: AsyncSession, week_start_local: date) -> list[Training]:
-    """Все занятия недели (включая отменённые — их видно на картинке)."""
-    start_utc = to_utc(datetime.combine(week_start_local, time.min))
-    end_utc = to_utc(datetime.combine(week_start_local + timedelta(days=7), time.min))
-    stmt = (
-        select(Training)
-        .where(Training.starts_at >= start_utc, Training.starts_at < end_utc)
-        .order_by(Training.starts_at)
+async def _in_range(
+    session: AsyncSession, since: date, until: date, include_cancelled: bool
+) -> list[Training]:
+    stmt = select(Training).where(
+        Training.starts_at >= to_utc(datetime.combine(since, time.min)),
+        Training.starts_at < to_utc(datetime.combine(until, time.min)),
     )
-    return list(await session.scalars(stmt))
+    if not include_cancelled:
+        stmt = stmt.where(Training.is_cancelled.is_(False))
+    return list(await session.scalars(stmt.order_by(Training.starts_at)))
 
 
-async def for_day(session: AsyncSession, day_local: date) -> list[Training]:
-    start_utc = to_utc(datetime.combine(day_local, time.min))
-    end_utc = to_utc(datetime.combine(day_local + timedelta(days=1), time.min))
-    stmt = (
-        select(Training)
-        .where(Training.starts_at >= start_utc, Training.starts_at < end_utc)
-        .order_by(Training.starts_at)
+async def for_week(
+    session: AsyncSession, week_start_local: date, *, include_cancelled: bool = True
+) -> list[Training]:
+    """Занятия недели.
+
+    По умолчанию с отменёнными: они нужны на картинке расписания, где видно,
+    что занятие сняли. Студенту в списках их показывать нельзя — записаться
+    всё равно не выйдет, — поэтому там include_cancelled=False.
+    """
+    return await _in_range(
+        session, week_start_local, week_start_local + timedelta(days=7), include_cancelled
     )
-    return list(await session.scalars(stmt))
+
+
+async def for_day(
+    session: AsyncSession, day_local: date, *, include_cancelled: bool = True
+) -> list[Training]:
+    return await _in_range(session, day_local, day_local + timedelta(days=1), include_cancelled)
+
+
+async def days_with_trainings(
+    session: AsyncSession, week_start_local: date, *, include_cancelled: bool = True
+) -> list[int]:
+    """Номера дней недели (0-6), где есть занятия. Пустые дни в меню не показываем."""
+    items = await for_week(session, week_start_local, include_cancelled=include_cancelled)
+    return sorted({to_local(t.starts_at).weekday() for t in items})
 
 
 async def past(session: AsyncSession, limit: int = 30) -> list[Training]:

@@ -13,8 +13,8 @@ from app.tz import fmt_short, now_utc
 
 async def overview(session: AsyncSession) -> dict:
     total_students = await session.scalar(select(func.count(Student.id))) or 0
-    authorized = await session.scalar(
-        select(func.count(Student.id)).where(Student.external_student_id.is_not(None))
+    with_email = await session.scalar(
+        select(func.count(Student.id)).where(Student.email.is_not(None))
     ) or 0
     banned = await session.scalar(select(func.count(Student.id)).where(Student.is_banned.is_(True))) or 0
 
@@ -37,7 +37,7 @@ async def overview(session: AsyncSession) -> dict:
 
     return {
         "total_students": total_students,
-        "authorized": authorized,
+        "with_email": with_email,
         "banned": banned,
         "total_trainings": total_trainings,
         "upcoming": upcoming,
@@ -86,7 +86,7 @@ async def export_csv(session: AsyncSession) -> bytes:
     writer.writerow(
         [
             "booking_id", "training_id", "training", "starts_at",
-            "student_id", "external_student_id", "full_name", "tg_username", "email",
+            "student_id", "mm_user_id", "full_name", "mm_username", "email",
             "status", "attendance", "strike",
         ]
     )
@@ -94,8 +94,8 @@ async def export_csv(session: AsyncSession) -> bytes:
         writer.writerow(
             [
                 b.id, b.training_id, b.training.title, fmt_short(b.training.starts_at),
-                b.student_id, b.student.external_student_id or "", b.student.full_name or "",
-                b.student.tg_username or "", b.student.email or "",
+                b.student_id, b.student.mm_user_id, b.student.full_name or "",
+                b.student.mm_username or "", b.student.email or "",
                 b.status.value, b.attendance.value, int(b.counted_as_strike),
             ]
         )

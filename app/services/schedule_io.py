@@ -68,8 +68,8 @@ class ApplyResult:
     created: int = 0
     removed: int = 0
     kept_past: int = 0
-    # кому написать, что его запись отменилась: (telegram id, текст про занятие)
-    notify: list[tuple[int, str]] = field(default_factory=list)
+    # кому написать, что его запись отменилась: (id в Mattermost, текст про занятие)
+    notify: list[tuple[str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- выгрузка
@@ -328,7 +328,7 @@ async def _apply(session: AsyncSession, parsed: ParsedSchedule, *, dry_run: bool
         for b in bookings:
             local = to_local(b.training.starts_at)
             result.notify.append(
-                (b.student.tg_user_id, f"{b.training.title} — {local:%d.%m} в {local:%H:%M}")
+                (b.student.mm_user_id, f"{b.training.title} — {local:%d.%m} в {local:%H:%M}")
             )
 
     planned = expand(parsed)

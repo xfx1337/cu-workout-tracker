@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint,
+    Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -29,16 +29,16 @@ class Attendance(str, enum.Enum):
 
 
 class Student(Base):
+    """Студент. Личность берётся из Mattermost — отдельная авторизация не нужна:
+    почта в корпоративном мессенджере уже подтверждена организацией."""
+
     __tablename__ = "students"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tg_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    tg_username: Mapped[str | None] = mapped_column(String(64))
-
-    # то, что вернула ручка ЦУ
-    external_student_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    mm_user_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    mm_username: Mapped[str | None] = mapped_column(String(64), index=True)
+    email: Mapped[str | None] = mapped_column(String(255), index=True)
     full_name: Mapped[str | None] = mapped_column(String(255))
-    email: Mapped[str | None] = mapped_column(String(255))
 
     # «есть справка + расписался в журнале по ТБ»
     consent_accepted_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -52,21 +52,22 @@ class Student(Base):
     bookings: Mapped[list["Booking"]] = relationship(back_populates="student")
 
     @property
-    def is_authorized(self) -> bool:
-        return bool(self.external_student_id)
-
-    @property
     def display_name(self) -> str:
-        name = self.full_name or (f"@{self.tg_username}" if self.tg_username else None)
-        return name or f"id{self.tg_user_id}"
+        return self.full_name or self.email or (
+            f"@{self.mm_username}" if self.mm_username else self.mm_user_id
+        )
 
 
 class Admin(Base):
+    """Администратор. Опознаём по почте: username в Mattermost человек может сменить,
+    почта же выдана организацией и совпадает с той, что в ADMIN_EMAILS."""
+
     __tablename__ = "admins"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tg_username: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
-    tg_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    mm_user_id: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)
+    mm_username: Mapped[str | None] = mapped_column(String(64))
     is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc)
 
@@ -116,7 +117,7 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    actor_tg_id: Mapped[int | None] = mapped_column(BigInteger)
+    actor_email: Mapped[str | None] = mapped_column(String(255))
     actor_username: Mapped[str | None] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(64))
     details: Mapped[str] = mapped_column(Text, default="")

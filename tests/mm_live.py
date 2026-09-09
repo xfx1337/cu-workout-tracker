@@ -14,15 +14,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 
 import httpx
 
-os.environ.setdefault("BOT_TOKEN", "unused")
-
-from app.config import settings  # noqa: E402
-from app.mm.client import MattermostClient  # noqa: E402
+from app.config import settings
+from app.mm.client import MattermostClient
 
 STUDENT = ("student1", "Student12345!")
 
