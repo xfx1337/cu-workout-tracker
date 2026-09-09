@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.git/
+.env
+*.db
+*.db-journal
+*.sqlite3
+bot.log
+preview_week.png
+exports/
+.idea/
+.vscode/
+README.md

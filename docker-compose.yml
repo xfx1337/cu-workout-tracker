@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-workout}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workout}
+      POSTGRES_DB: ${POSTGRES_DB:-workout}
+      # чтобы now() и логи базы были в UTC — в коде всё время наивный UTC
+      TZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Порт наружу НЕ публикуем: бот ходит к базе по внутренней сети как db:5432.
+    # На сервере 5432 может быть занят чужим Postgres, и публикация ломала бы старт.
+    # Для локальной работы порт пробрасывает docker-compose.override.yml.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-workout} -d ${POSTGRES_DB:-workout}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      # перебивает DATABASE_URL из .env: внутри compose база всегда своя
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workout}:${POSTGRES_PASSWORD:-workout}@db:5432/${POSTGRES_DB:-workout}
+      TZ: ${TZ_NAME:-Europe/Moscow}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,10 @@
+# Локальные добавки к docker-compose.yml. Compose подхватывает этот файл сам,
+# если он лежит рядом. На сервер он НЕ копируется (см. deploy/push.ps1), поэтому
+# в проде порт базы наружу не публикуется и не конфликтует с чужим Postgres.
+#
+# Нужен, чтобы с хоста можно было зайти psql'ем и прогнать тесты на боевом движке:
+#   SMOKE_DATABASE_URL=postgresql+asyncpg://workout:workout@127.0.0.1:5432/workout_test
+services:
+  db:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"

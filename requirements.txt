@@ -1,0 +1,11 @@
+aiogram==3.15.0
+SQLAlchemy==2.0.36
+pydantic-settings==2.6.1
+httpx==0.27.2
+tzdata==2024.2
+Pillow==11.0.0
+openpyxl==3.1.5
+
+# драйверы БД: Postgres — рабочий вариант, SQLite остаётся для локального запуска и тестов
+asyncpg==0.30.0
+aiosqlite==0.20.0
