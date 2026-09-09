@@ -10,7 +10,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.mm.client import MattermostClient, MMUser
+from app.actions_server import ActionRegistry
+from app.config import settings
+from app.mm.client import MattermostClient, MattermostError, MMUser
+from app.ui import Screen, build_props, build_reactions
 
 log = logging.getLogger(__name__)
 
@@ -54,9 +57,15 @@ class SessionStore:
 class BotContext:
     """Слой между транспортом и обработчиками: экраны с реакциями и личность."""
 
-    def __init__(self, mm: MattermostClient, store: SessionStore | None = None) -> None:
+    def __init__(
+        self,
+        mm: MattermostClient,
+        store: SessionStore | None = None,
+        actions: ActionRegistry | None = None,
+    ) -> None:
         self.mm = mm
         self.store = store or SessionStore()
+        self.actions = actions or ActionRegistry()
         self._user_cache: dict[str, MMUser] = {}
 
     async def user(self, user_id: str) -> MMUser:
@@ -104,6 +113,68 @@ class BotContext:
         s = self.store.get(user_id)
         s.active_post_id = post.id
         s.reactions = dict(reactions or {})
+        s.fsm = fsm
+        if fsm_data is not None:
+            s.fsm_data = fsm_data
+        if data is not None:
+            s.data = data
+        return post.id
+
+    async def show(
+        self,
+        user_id: str,
+        scr: Screen,
+        *,
+        fsm: str = "",
+        fsm_data: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        new_message: bool = False,
+    ) -> str:
+        """Показывает экран.
+
+        С кнопками правим прошлое сообщение — диалог остаётся одним постом,
+        как это было в Telegram. С реакциями так нельзя: чужие реакции с него
+        не снять, поэтому каждый экран уходит новым сообщением.
+        """
+        s = self.store.get(user_id)
+        channel = await self._channel(user_id)
+
+        file_ids: list[str] = []
+        if scr.image is not None:
+            file_ids = [await self.mm.upload_file(channel, scr.filename, scr.image)]
+
+        mapping: dict[str, str] = {}
+        if settings.use_buttons:
+            token = self.actions.issue(user_id)
+            url = f"{settings.mm_public_url.rstrip('/')}/mm/action/{token}"
+            text = scr.text
+            props = build_props(scr, url)
+        else:
+            token = ""
+            text, mapping = build_reactions(scr)
+            props = {}
+
+        post = None
+        if settings.use_buttons and s.active_post_id and not new_message:
+            try:
+                post = await self.mm.update_post(
+                    s.active_post_id, text, file_ids=file_ids, props=props
+                )
+            except MattermostError as exc:
+                log.info("не смог обновить экран %s, пришлю новый: %s", s.active_post_id, exc)
+
+        if post is None:
+            post = await self.mm.create_post(
+                channel, text, file_ids=file_ids or None, props=props or None
+            )
+            for emoji in mapping:
+                await self.mm.add_reaction(post.id, emoji)
+
+        if settings.use_buttons:
+            self.actions.bind(token, user_id, post.id, {c.action for c in scr.choices})
+
+        s.active_post_id = post.id
+        s.reactions = mapping
         s.fsm = fsm
         if fsm_data is not None:
             s.fsm_data = fsm_data

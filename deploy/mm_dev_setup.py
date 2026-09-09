@@ -60,8 +60,13 @@ def main() -> int:
     config["ServiceSettings"]["EnableUserAccessTokens"] = True
     config["ServiceSettings"]["EnablePostUsernameOverride"] = True
     config["ServiceSettings"]["EnablePostIconOverride"] = True
+    # Mattermost не зовёт интеграции на приватных адресах, пока их не разрешишь.
+    # На боевом TiMe то же самое понадобится, если бот стоит во внутренней сети.
+    config["ServiceSettings"]["AllowedUntrustedInternalConnections"] = (
+        "host.docker.internal localhost 127.0.0.1 192.168.65.254 172.17.0.0/16 10.0.0.0/8"
+    )
     saved = http.put("/config", json=config)
-    print("боты и персональные токены разрешены" if saved.status_code < 400
+    print("боты, токены и вызовы интеграций во внутреннюю сеть разрешены" if saved.status_code < 400
           else f"не смог поправить конфиг: {saved.status_code}")
 
     # --- команда ---

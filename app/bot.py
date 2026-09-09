@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from app import scheduler
+from app.actions_server import ActionRegistry, ActionServer
 from app.config import settings
 from app.db import SessionMaker, init_db
 from app.handlers import common as common_h
@@ -55,6 +56,16 @@ async def handle_event(ctx: BotContext, event) -> None:
         return
 
 
+async def handle_button(ctx: BotContext, user_id: str, post_id: str, action: str) -> None:
+    """Подтверждённый клик по кнопке. Проверки уже сделал ActionServer."""
+    s = ctx.store.get(user_id)
+    s.active_post_id = post_id
+    async with SessionMaker() as session:
+        user = await ctx.user(user_id)
+        student, admin = await common_h.ensure_identity(session, user)
+        await dispatch_action(ctx, session, s, student, admin, action)
+
+
 async def main() -> None:
     await init_db()
     async with SessionMaker() as session:
@@ -64,9 +75,22 @@ async def main() -> None:
         log.warning("ADMIN_EMAILS не задан — никого не заведу админом через .env")
 
     mm = MattermostClient(settings.mm_url, settings.mm_token)
-    ctx = BotContext(mm)
+    registry = ActionRegistry()
+    ctx = BotContext(mm, actions=registry)
     notifier = Notifier(ctx)
     poller = Poller(ctx)
+
+    # Кнопки-attachments работают, только если сервер Mattermost может к нам
+    # достучаться. Нет адреса — молча откатываемся на реакции.
+    server: ActionServer | None = None
+    if settings.use_buttons:
+        server = ActionServer(
+            registry,
+            lambda uid, pid, act: handle_button(ctx, uid, pid, act),
+            settings.mm_listen_port,
+        )
+    else:
+        log.warning("MM_PUBLIC_URL не задан — вместо кнопок будут реакции-эмодзи")
 
     try:
         me = await mm.whoami()
@@ -78,6 +102,9 @@ async def main() -> None:
 
     scheduler_task: asyncio.Task | None = None
     try:
+        if server is not None:
+            await server.start()
+            log.info("кнопки включены, Mattermost будет стучаться на %s", settings.mm_public_url)
         scheduler_task = asyncio.create_task(scheduler.run(notifier))
         async for event in poller.events():
             try:
@@ -91,6 +118,8 @@ async def main() -> None:
     finally:
         if scheduler_task is not None:
             scheduler_task.cancel()
+        if server is not None:
+            await server.stop()
         await mm.close()
 
 
