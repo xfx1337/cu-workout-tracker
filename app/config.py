@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # Пока такого адреса нет, выбор делается реакциями-эмодзи по WebSocket.
     mm_public_url: str = ""               # адрес нашего бота, виден серверу Mattermost
     mm_listen_port: int = 8080
+    # WebSocket на TiMe недоступен (ingress режет upgrade) — события получаем опросом REST
+    poll_interval_seconds: float = 2.0
 
     # Админов опознаём по корпоративной почте: username в Mattermost меняется,
     # почта — нет. Хранится строкой: pydantic-settings парсит list[str] из env как JSON.

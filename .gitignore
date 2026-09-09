@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 .env
+certs/
+token.txt
+data/
 *.db
 *.db-journal
 *.sqlite3

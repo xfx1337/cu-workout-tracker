@@ -50,6 +50,7 @@ class MMPost:
     props: dict[str, Any] = field(default_factory=dict)
     file_ids: list[str] = field(default_factory=list)
     root_id: str = ""
+    create_at: int = 0
 
 
 @dataclass(slots=True)
@@ -88,6 +89,7 @@ def _post(data: dict[str, Any]) -> MMPost:
         props=data.get("props") or {},
         file_ids=data.get("file_ids") or [],
         root_id=data.get("root_id", ""),
+        create_at=data.get("create_at", 0),
     )
 
 
@@ -147,6 +149,40 @@ class MattermostClient:
         self._dm_cache[user_id] = data["id"]
         return data["id"]
 
+    # ---------------------------------------------------------------- поллинг
+
+    async def list_my_channels(self) -> list[dict[str, Any]]:
+        """Каналы, где состоит бот (лички D, группы G, каналы команд O/P)."""
+        if self.me is None:
+            await self.whoami()
+        out: list[dict[str, Any]] = []
+        page = 0
+        while True:
+            chunk = await self._request(
+                "GET", f"/users/{self.me.id}/channels",
+                params={"page": page, "per_page": 200},
+            )
+            if not chunk:
+                break
+            out.extend(chunk)
+            if len(chunk) < 200:
+                break
+            page += 1
+        return out
+
+    async def channel_posts_since(self, channel_id: str, since_ms: int) -> list[MMPost]:
+        """Посты канала новее since_ms (create_at, мс), от старых к новым."""
+        data = await self._request(
+            "GET", f"/channels/{channel_id}/posts", params={"since": str(since_ms)}
+        )
+        posts = data.get("posts") or {}
+        order = data.get("order") or []
+        return [_post(posts[pid]) for pid in order if pid in posts]
+
+    async def post_reactions(self, post_id: str) -> list[dict[str, Any]]:
+        """Реакции на пост: [{"user_id": ..., "emoji_name": ...}]."""
+        return await self._request("GET", f"/posts/{post_id}/reactions")
+
     async def create_post(
         self,
         channel_id: str,
@@ -199,6 +235,13 @@ class MattermostClient:
         return infos[0]["id"]
 
     # ---------- реакции: наш способ получить клик без входящего порта ----------
+
+    async def download_file(self, file_id: str) -> bytes:
+        """Скачивает содержимое файла по его id (нужно для загрузки Excel-расписания)."""
+        resp = await self._http.get(f"/files/{file_id}")
+        if resp.status_code >= 400:
+            raise MattermostError(f"download {file_id} -> {resp.status_code}: {resp.text[:300]}")
+        return resp.content
 
     async def add_reaction(self, post_id: str, emoji: str) -> None:
         if self.me is None:

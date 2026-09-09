@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app import reactions as R
+from app import texts
+from app.config import settings
+from app.models import Admin, Attendance, Booking, BookingStatus, Student, Training
+from app.render import plural_ru, render_week, week_title
+from app.runtime import BotContext, UserSession
+from app.services import bookings as bookings_svc
+from app.services import enforcement
+from app.services import trainings as trainings_svc
+from app.services.bookings import BookResult, CancelResult
+from app.tz import (
+    MONTHS_RU, WEEKDAYS_RU, fmt_short, now_utc, to_local, week_offset_of, week_start,
+)
+
+log = logging.getLogger(__name__)
+
+MAX_WEEK_OFFSET = 30
+
+ATTENDANCE_WORDS = {
+    Attendance.ATTENDED: "✅ был",
+    Attendance.NO_SHOW: "❌ пропуск",
+    Attendance.EXCUSED: "➖ отменил",
+    Attendance.UNKNOWN: "❔ без отметки",
+}
+
+
+async def _gate(ctx: BotContext, s: UserSession, student: Student) -> bool:
+    from app.handlers.common import show_consent
+
+    if student.is_banned:
+        await ctx.notify(s.user_id, texts.BANNED.format(reason=student.ban_reason or "решение администратора"))
+        return False
+    if student.consent_accepted_at is None:
+        await show_consent(ctx, None, s, student)
+        return False
+    return True
+
+
+def _legend(pairs: list[tuple[int, str]]) -> str:
+    return "  ".join(f"{R.symbol(name)} {label}" for name, label in pairs)
+
+
+# ---------- недельная сетка картинкой ----------
+
+async def open_schedule(
+    ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, admin: Admin | None, offset: int = 0,
+) -> None:
+    if not await _gate(ctx, s, student):
+        return
+    monday = week_start(offset)
+    items = await trainings_svc.for_week(session, monday)
+    taken = await trainings_svc.taken_map(session, [t.id for t in items])
+    booked_ids = {b.training_id for b in await bookings_svc.active_for_student(session, student.id)}
+
+    caption = (
+        f"<b>Расписание</b> · {week_title(monday, monday + timedelta(days=6))}\n"
+        "Выбери день недели реакцией 👇"
+    )
+    if not items:
+        caption = f"<b>{week_title(monday, monday + timedelta(days=6))}</b>\nНа эту неделю занятий нет."
+
+    try:
+        png = render_week(items, taken, booked_ids, monday)
+    except Exception:
+        log.exception("не удалось нарисовать расписание, отдаю текстом")
+        await _text_schedule(ctx, session, s, student)
+        return
+
+    live = [t for t in items if not t.is_cancelled]
+    days = sorted({to_local(t.starts_at).weekday() for t in live})
+    has_next = offset < MAX_WEEK_OFFSET and bool(
+        await trainings_svc.for_week(session, week_start(offset + 1))
+    )
+
+    reactions: dict[str, str] = {}
+    legend: list[tuple[int, str]] = []
+    for i, weekday in enumerate(days, 1):
+        name, _ = R.number(i)
+        reactions[name] = f"wk:day:{weekday}"
+        legend.append((i, WEEKDAYS_RU[weekday]))
+    if offset > 0:
+        reactions["arrow_left"] = f"wk:week:{offset - 1}"
+    if has_next:
+        reactions["arrow_right"] = f"wk:week:{offset + 1}"
+    reactions["ticket"] = "nav:my"
+    reactions["information_source"] = "nav:help"
+    if admin:
+        reactions["wrench"] = "nav:admin"
+
+    if legend:
+        caption += "\n\n" + _legend(legend)
+    if offset > 0 or has_next:
+        caption += "\n← / → — соседние недели"
+
+    await ctx.send(
+        s.user_id, caption,
+        file_bytes=png, filename=f"schedule-{monday}.png",
+        reactions=reactions,
+        data={"screen": "week", "offset": offset},
+    )
+
+
+async def show_day(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, offset: int, weekday: int) -> None:
+    day = week_start(offset) + timedelta(days=weekday)
+    items = [t for t in await trainings_svc.for_day(session, day) if not t.is_cancelled]
+    taken = await trainings_svc.taken_map(session, [t.id for t in items])
+    booked_ids = {b.training_id for b in await bookings_svc.active_for_student(session, student.id)}
+
+    lines = [f"<b>{WEEKDAYS_RU[weekday]}, {day.day} {MONTHS_RU[day.month - 1]}</b>", ""]
+    if not items:
+        lines.append("В этот день занятий нет.")
+    reactions: dict[str, str] = {}
+    legend: list[tuple[int, str]] = []
+    for i, t in enumerate(items, 1):
+        free = max(t.capacity - taken.get(t.id, 0), 0)
+        if t.id in booked_ids:
+            note = "ты записан"
+        elif free == 0:
+            note = "мест нет"
+        else:
+            note = f"свободно {free} {plural_ru(free, 'место', 'места', 'мест')}"
+        who = f" · {t.instructor}" if t.instructor else ""
+        start = to_local(t.starts_at)
+        lines.append(f"<b>{start:%H:%M}</b> {t.title}{who} — {note}")
+        name, _ = R.number(i)
+        reactions[name] = f"tr:view:{t.id}"
+        legend.append((i, f"{start:%H:%M} {t.title}"))
+
+    lines += ["", "Выбери тренировку реакцией 👇"]
+    if legend:
+        lines.append(_legend(legend))
+    reactions["arrow_left"] = "nav:schedule"
+
+    await ctx.send(
+        s.user_id, "\n".join(lines), reactions=reactions,
+        data={"screen": "day", "offset": offset, "weekday": weekday},
+    )
+
+
+async def show_training(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, training_id: int) -> None:
+    training = await trainings_svc.by_id(session, training_id)
+    if training is None:
+        await ctx.notify(s.user_id, "Тренировка не найдена.")
+        return
+    taken = await trainings_svc.taken(session, training.id)
+    booking = await bookings_svc.get_booking(session, student.id, training.id)
+    is_booked = booking is not None and booking.status is BookingStatus.BOOKED
+
+    text = trainings_svc.card(training, taken)
+    if training.is_cancelled:
+        text += "\n\nЗанятие не состоится, записаться нельзя."
+    elif is_booked:
+        text += "\n\n✅ <b>Ты записан.</b>"
+
+    offset = s.data.get("offset", 0)
+    weekday = s.data.get("weekday", -1)
+    reactions: dict[str, str] = {}
+    if not training.is_cancelled:
+        action = "cancel" if is_booked else "book"
+        reactions["x" if is_booked else "heavy_plus_sign"] = f"tr:{action}:{training.id}"
+    if weekday >= 0:
+        reactions["arrow_left"] = f"wk:day:{weekday}"
+    else:
+        reactions["arrow_left"] = "nav:schedule"
+    reactions["ticket"] = "nav:my"
+    reactions["information_source"] = "nav:help"
+
+    await ctx.send(
+        s.user_id, text, reactions=reactions,
+        data={"screen": "training", "offset": offset, "weekday": weekday, "training_id": training.id},
+    )
+
+
+async def _text_schedule(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student) -> None:
+    items = await trainings_svc.upcoming(session)
+    if not items:
+        await ctx.send(s.user_id, texts.NO_TRAININGS, reactions={"information_source": "nav:help"})
+        return
+    taken = await trainings_svc.taken_map(session, [t.id for t in items])
+    booked_ids = {b.training_id for b in await bookings_svc.active_for_student(session, student.id)}
+    lines = ["<b>Ближайшие тренировки</b>", ""]
+    reactions: dict[str, str] = {}
+    legend: list[tuple[int, str]] = []
+    for i, t in enumerate(items[:9], 1):
+        free = max(t.capacity - taken.get(t.id, 0), 0)
+        mark = "✅" if t.id in booked_ids else ("🔴" if free == 0 else "🟢")
+        lines.append(f"{mark} {fmt_short(t.starts_at)} · {t.title} · {taken.get(t.id, 0)}/{t.capacity}")
+        name, _ = R.number(i)
+        reactions[name] = f"tr:view:{t.id}"
+        legend.append((i, fmt_short(t.starts_at)))
+    lines += ["", "Нажми номер тренировки:"]
+    lines.append(_legend(legend))
+    reactions["information_source"] = "nav:help"
+    await ctx.send(s.user_id, "\n".join(lines), reactions=reactions)
+
+
+# ---------- запись и отмена ----------
+
+async def book(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, training_id: int) -> None:
+    if not await _gate(ctx, s, student):
+        return
+    training = await trainings_svc.by_id(session, training_id)
+    if training is None:
+        await ctx.notify(s.user_id, "Тренировка не найдена.")
+        return
+
+    result = await bookings_svc.book(session, student, training)
+    if result is not BookResult.OK:
+        alerts = {
+            BookResult.ALREADY: texts.ALREADY_BOOKED,
+            BookResult.FULL: texts.FULL.format(capacity=training.capacity),
+            BookResult.CANCELLED: "Эта тренировка отменена.",
+            BookResult.PAST: "Эта тренировка уже прошла.",
+            BookResult.BANNED: "Запись для тебя закрыта.",
+        }
+        await ctx.notify(s.user_id, alerts[result])
+        await show_training(ctx, session, s, student, training.id)
+        return
+
+    taken = await trainings_svc.taken(session, training.id)
+    await ctx.notify(s.user_id, texts.BOOKED_OK.format(
+        training=trainings_svc.card(training, taken), minutes=settings.reminder_minutes_before
+    ))
+    await show_training(ctx, session, s, student, training.id)
+
+
+async def cancel(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, training_id: int) -> None:
+    training = await trainings_svc.by_id(session, training_id)
+    if training is None:
+        await ctx.notify(s.user_id, "Тренировка не найдена.")
+        return
+
+    result = await bookings_svc.cancel(session, student, training)
+    if result is CancelResult.TOO_LATE:
+        await ctx.notify(s.user_id, texts.CANCEL_TOO_LATE.format(minutes=settings.cancel_deadline_minutes))
+        return
+    if result is CancelResult.NOT_FOUND:
+        await ctx.notify(s.user_id, "Активной записи нет.")
+        return
+
+    taken = await trainings_svc.taken(session, training.id)
+    await ctx.notify(s.user_id, f"{texts.CANCELLED_OK}\n\n{trainings_svc.card(training, taken)}")
+    await show_training(ctx, session, s, student, training.id)
+
+
+async def my_bookings(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, admin: Admin | None, offset: int = 0) -> None:
+    if not await _gate(ctx, s, student):
+        return
+    active = await bookings_svc.active_for_student(session, student.id)
+    lines = ["<b>Твои записи</b>", ""]
+    if not active:
+        lines.append(texts.NO_BOOKINGS)
+    else:
+        for i, b in enumerate(active, 1):
+            lines.append(f"{R.symbol(R.number(i)[0])} {fmt_short(b.training.starts_at)} — {b.training.title}")
+
+    history = await bookings_svc.history_for_student(session, student.id, limit=5)
+    if history:
+        lines += ["", "<b>История</b>", ""]
+        for b in history:
+            note = (
+                "🚫 занятие отменили"
+                if b.status is BookingStatus.CANCELLED_BY_ADMIN
+                else ATTENDANCE_WORDS[b.attendance]
+            )
+            lines.append(f"• {fmt_short(b.training.starts_at)} — {b.training.title} — {note}")
+    if student.no_show_count:
+        lines += ["", f"⚠️ Пропусков без отмены: {student.no_show_count} из {settings.no_show_limit}"]
+
+    reactions: dict[str, str] = {}
+    legend: list[tuple[int, str]] = []
+    for i, b in enumerate(active, 1):
+        name, _ = R.number(i)
+        reactions[name] = f"tr:cancel:{b.training_id}"
+        legend.append((i, f"отменить: {b.training.title}"))
+    reactions["arrow_left"] = "nav:schedule"
+    reactions["information_source"] = "nav:help"
+    if admin:
+        reactions["wrench"] = "nav:admin"
+    if legend:
+        lines += ["", "Отменить запись реакцией:"]
+        lines.append(_legend(legend))
+
+    await ctx.send(
+        s.user_id, "\n".join(lines), reactions=reactions,
+        data={"screen": "my", "offset": offset},
+    )
+
+
+async def poll_answer(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, booking_id: int, came: bool) -> None:
+    booking = await session.get(Booking, booking_id)
+    if booking is None:
+        await ctx.notify(s.user_id, "Запись не найдена.")
+        return
+
+    if came:
+        await enforcement.mark_attended(session, booking)
+        await ctx.notify(s.user_id, texts.POLL_THANKS_YES)
+        return
+
+    if settings.self_reported_absence_counts:
+        await session.refresh(booking, ["student"])
+        await enforcement.mark_no_show(session, ctx, booking, count_strike=True)
+    else:
+        await enforcement.mark_excused(session, booking)
+    await ctx.notify(s.user_id, texts.POLL_THANKS_NO)
