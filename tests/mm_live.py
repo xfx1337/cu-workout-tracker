@@ -20,6 +20,7 @@ import httpx
 
 from app.config import settings
 from app.mm.client import MattermostClient
+from tests.live_guard import skip, stand_unavailable
 
 STUDENT = ("student1", "Student12345!")
 
@@ -44,9 +45,9 @@ async def login_as(username: str, password: str) -> tuple[httpx.AsyncClient, str
 
 
 async def main() -> int:
-    if not settings.mm_url or not settings.mm_token:
-        print("MM_URL и MM_TOKEN не заданы — стенд не поднят, пропускаю.")
-        return 0
+    reason = await stand_unavailable()
+    if reason:
+        return skip(reason)
 
     mm = MattermostClient(settings.mm_url, settings.mm_token)
 

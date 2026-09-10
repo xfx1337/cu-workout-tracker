@@ -3,7 +3,8 @@ __pycache__/
 .venv/
 venv/
 .env
-certs/
+certs/*
+!certs/.gitkeep
 token.txt
 data/
 *.db

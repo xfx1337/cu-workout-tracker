@@ -25,6 +25,7 @@ from app.config import settings
 from app.mm.client import MattermostClient
 from app.runtime import BotContext
 from app.ui import Choice, group, screen
+from tests.live_guard import skip, stand_unavailable
 
 STUDENT = ("student1", "Student12345!")
 PASSED = 0
@@ -47,12 +48,11 @@ async def login_as(username: str, password: str) -> tuple[httpx.AsyncClient, str
 
 
 async def main() -> int:
-    if not settings.mm_url or not settings.mm_token:
-        print("MM_URL/MM_TOKEN не заданы — пропускаю.")
-        return 0
+    reason = await stand_unavailable()
+    if reason:
+        return skip(reason)
     if not settings.use_buttons:
-        print("MM_PUBLIC_URL не задан — режим кнопок выключен, пропускаю.")
-        return 0
+        return skip("MM_PUBLIC_URL не задан — режим кнопок выключен")
 
     got: list[tuple[str, str, str]] = []
     caught = asyncio.Event()

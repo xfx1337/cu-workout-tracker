@@ -10,14 +10,22 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends fonts-dejavu-core ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Корпоративный MITM: и pip install, и рантайм-соединение с TiMe идут через
-# корпоративный прокси, чей корень не входит в системный store. Добавляем
-# корпоративные корни к системным и подставляем общий бандл в SSL_CERT_FILE.
-# certs/corporate-ca.crt не коммитится (см. .gitignore) — на других машинах
-# положить свой бандл или убрать эти строки.
-COPY certs/corporate-ca.crt /tmp/corporate-ca.crt
-RUN cat /etc/ssl/certs/ca-certificates.crt /tmp/corporate-ca.crt > /etc/ssl/certs/all-ca.crt \
- && rm /tmp/corporate-ca.crt
+# Корпоративный MITM: в сети ЦУ и pip, и соединение с TiMe идут через прокси,
+# чей корень не входит в системный набор. Если в certs/ лежат .crt — подмешиваем
+# их к системным; если нет — берём только системные.
+#
+# Сертификаты в git не попадают (см. .gitignore), в репозитории лежит только
+# certs/.gitkeep. Благодаря этому образ собирается и там, где прокси нет:
+# при обязательном COPY конкретного файла сборка падала бы на его отсутствии.
+COPY certs/ /tmp/certs/
+RUN if ls /tmp/certs/*.crt >/dev/null 2>&1; then \
+        cat /etc/ssl/certs/ca-certificates.crt /tmp/certs/*.crt > /etc/ssl/certs/all-ca.crt; \
+        echo "подмешаны корпоративные корни"; \
+    else \
+        cp /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/all-ca.crt; \
+        echo "корпоративных корней нет, только системные"; \
+    fi \
+ && rm -rf /tmp/certs
 ENV SSL_CERT_FILE=/etc/ssl/certs/all-ca.crt
 
 WORKDIR /app
