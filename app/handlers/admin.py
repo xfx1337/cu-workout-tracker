@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import reactions as R
 from app import texts
 from app.config import settings
 from app.models import Admin, Attendance, Booking, Student, Training
@@ -22,6 +21,7 @@ from app.tz import (
     MONTHS_RU, WEEKDAYS_RU, fmt_dt, fmt_short, now_utc, parse_local, to_local,
     week_offset_of, week_start,
 )
+from app.ui import CANCEL, MENU, Choice, group, screen
 
 log = logging.getLogger(__name__)
 
@@ -42,9 +42,9 @@ CYCLE = {
     Attendance.EXCUSED: Attendance.ATTENDED,
 }
 
-MENU_TEXT = "🛠 <b>Админка</b>\n\nВыбирай раздел реакцией 👇"
+MENU_TEXT = "🛠 <b>Админка</b>\n\nВыбирай раздел 👇"
 
-# пункты меню: (ключ, подпись) — нумеруются для реакций
+# пункты меню: (ключ, подпись)
 MENU_ITEMS = [
     ("trainings", "Тренировки"),
     ("new", "Новая тренировка"),
@@ -58,30 +58,18 @@ MENU_ITEMS = [
 ]
 
 
-async def _menu_reactions() -> dict[str, str]:
-    reactions: dict[str, str] = {}
-    for i, (key, _label) in enumerate(MENU_ITEMS, 1):
-        name, _ = R.number(i)
-        reactions[name] = f"adm:{key}"
-    reactions["arrow_left"] = "nav:schedule"
-    return reactions
-
-
 async def admin_menu(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student, admin: Admin) -> None:
-    lines = [MENU_TEXT, ""]
-    for i, (_key, label) in enumerate(MENU_ITEMS, 1):
-        name, sym = R.number(i)
-        lines.append(f"{sym} {label}")
-    lines.append(f"{R.symbol('arrow_left')} К расписанию")
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=await _menu_reactions(),
+    choices = [Choice(label, f"adm:{key}") for key, label in MENU_ITEMS]
+    choices.append(Choice("К расписанию", "nav:schedule", emoji="arrow_left"))
+    await ctx.show(
+        s.user_id, screen(MENU_TEXT, group(*choices)),
         data={"screen": "admin_menu"},
     )
 
 
 # ---------- тренировки: картинка недели ----------
 
-async def _week_view(session: AsyncSession, offset: int) -> tuple[bytes, str]:
+async def _week_view(session: AsyncSession, offset: int) -> tuple[bytes, str, list[Choice], list[Choice]]:
     monday = week_start(offset)
     items = await trainings_svc.for_week(session, monday)
     taken = await trainings_svc.taken_map(session, [t.id for t in items])
@@ -98,7 +86,7 @@ async def _week_view(session: AsyncSession, offset: int) -> tuple[bytes, str]:
     caption = (
         f"📅 <b>Тренировки</b> · {week_title(monday, monday + timedelta(days=6))}\n"
         f"Занятий: {len(items)}, записей: {total}\n\n"
-        "Выбери день реакцией 👇"
+        "Выбери день 👇"
     )
     if not items:
         caption = (
@@ -106,36 +94,20 @@ async def _week_view(session: AsyncSession, offset: int) -> tuple[bytes, str]:
             "На эту неделю занятий нет."
         )
 
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, weekday in enumerate(days, 1):
-        name, _ = R.number(i)
-        reactions[name] = f"awk:day:{weekday}"
-        legend.append((i, WEEKDAYS_RU[weekday]))
+    day_choices = [Choice(WEEKDAYS_RU[weekday], f"awk:day:{weekday}") for weekday in days]
+    nav: list[Choice] = [MENU]
     if has_prev:
-        reactions["arrow_left"] = f"awk:week:{offset - 1}"
+        nav.insert(0, Choice("← Прошлая неделя", f"awk:week:{offset - 1}", emoji="arrow_left"))
     if has_next:
-        reactions["arrow_right"] = f"awk:week:{offset + 1}"
-    reactions["no_entry"] = "adm:menu"
-
-    if legend:
-        caption += "\n\n" + _legend(legend)
-    if has_prev or has_next:
-        caption += "\n← / → — соседние недели"
-    return png, caption, reactions
-
-
-def _legend(pairs: list[tuple[int, str]]) -> str:
-    return "  ".join(f"{R.symbol(R.number(i)[0])} {label}" for i, label in pairs)
+        nav.insert(0, Choice("Следующая неделя →", f"awk:week:{offset + 1}", emoji="arrow_right"))
+    return png, caption, day_choices, nav
 
 
 async def show_admin_week(ctx: BotContext, session: AsyncSession, s: UserSession, offset: int = 0) -> None:
     monday = week_start(offset)
-    png, caption, reactions = await _week_view(session, offset)
-    await ctx.send(
-        s.user_id, caption,
-        file_bytes=png, filename=f"admin-{monday}.png",
-        reactions=reactions,
+    png, caption, day_choices, nav = await _week_view(session, offset)
+    await ctx.show(
+        s.user_id, screen(caption, group(*day_choices), group(*nav), image=png, filename=f"admin-{monday}.png"),
         data={"screen": "admin_week", "offset": offset},
     )
 
@@ -147,25 +119,20 @@ async def show_admin_day(ctx: BotContext, session: AsyncSession, s: UserSession,
     lines = [f"<b>{WEEKDAYS_RU[weekday]}, {day.day} {MONTHS_RU[day.month - 1]}</b>", ""]
     if not items:
         lines.append("В этот день занятий нет.")
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, t in enumerate(items, 1):
+    choices: list[Choice] = []
+    for t in items:
         busy = taken.get(t.id, 0)
         start = to_local(t.starts_at)
         note = "отменена" if t.is_cancelled else f"{busy}/{t.capacity}"
         who = f" · {t.instructor}" if t.instructor else ""
         lines.append(f"<b>{start:%H:%M}</b> {t.title}{who} — {note}")
-        name, _ = R.number(i)
-        reactions[name] = f"atr:view:{t.id}"
-        legend.append((i, f"{start:%H:%M} {t.title}"))
-    lines += ["", "Выбери тренировку реакцией 👇"]
-    if legend:
-        lines.append(_legend(legend))
-    reactions["arrow_left"] = f"awk:week:{offset}"
-    reactions["no_entry"] = "adm:menu"
+        choices.append(Choice(f"{start:%H:%M} {t.title}", f"atr:view:{t.id}"))
+    lines += ["", "Выбери тренировку 👇"]
+    choices.append(Choice("Назад", f"awk:week:{offset}", emoji="arrow_left"))
+    choices.append(MENU)
 
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "admin_day", "offset": offset, "weekday": weekday},
     )
 
@@ -180,18 +147,16 @@ async def show_admin_training(ctx: BotContext, session: AsyncSession, s: UserSes
     offset = s.data.get("offset", 0)
     weekday = s.data.get("weekday", 0)
 
-    reactions: dict[str, str] = {
-        "busts_in_silhouette": f"atr:people:{training.id}",
-    }
+    choices: list[Choice] = [Choice("Записанные", f"atr:people:{training.id}", emoji="busts_in_silhouette")]
     if is_past:
-        reactions["white_check_mark"] = f"atr:attend:{training.id}"
+        choices.append(Choice("Посещаемость", f"atr:attend:{training.id}", emoji="white_check_mark"))
     if not training.is_cancelled and not is_past:
-        reactions["x"] = f"atr:cancel:{training.id}"
-    reactions["arrow_left"] = f"awk:day:{weekday}"
-    reactions["no_entry"] = "adm:menu"
+        choices.append(Choice("Отменить", f"atr:cancel:{training.id}", style="danger", emoji="x"))
+    choices.append(Choice("Назад", f"awk:day:{weekday}", emoji="arrow_left"))
+    choices.append(MENU)
 
-    await ctx.send(
-        s.user_id, trainings_svc.card(training, taken), reactions=reactions,
+    await ctx.show(
+        s.user_id, screen(trainings_svc.card(training, taken), group(*choices)),
         data={"screen": "admin_training", "offset": offset, "weekday": weekday, "training_id": training.id},
     )
 
@@ -210,9 +175,10 @@ async def show_people(ctx: BotContext, session: AsyncSession, s: UserSession, ad
     lines.append(f"Всего: {len(people)}/{training.capacity}")
     offset = s.data.get("offset", 0)
     weekday = s.data.get("weekday", 0)
-    await ctx.send(
-        s.user_id, "\n".join(lines),
-        reactions={"arrow_left": f"atr:view:{training_id}", "no_entry": "adm:menu"},
+    await ctx.show(
+        s.user_id,
+        screen("\n".join(lines),
+               group(Choice("Назад", f"atr:view:{training_id}", emoji="arrow_left"), MENU)),
         data={"screen": "admin_training", "offset": offset, "weekday": weekday, "training_id": training.id},
     )
 
@@ -220,13 +186,15 @@ async def show_people(ctx: BotContext, session: AsyncSession, s: UserSession, ad
 async def cancel_training_ask(ctx: BotContext, session: AsyncSession, s: UserSession, training_id: int) -> None:
     training = await trainings_svc.by_id(session, training_id)
     taken = await trainings_svc.taken(session, training.id)
-    await ctx.send(
+    await ctx.show(
         s.user_id,
-        f"Отменить тренировку?\n\n{trainings_svc.card(training, taken)}\n\n"
-        f"Записанным ({taken}) уйдёт уведомление.\nНажми 🔥 для подтверждения.",
-        reactions={"fire": f"atr:cancel_confirm:{training.id}",
-                   "arrow_left": f"atr:view:{training.id}",
-                   "no_entry": "adm:menu"},
+        screen(
+            f"Отменить тренировку?\n\n{trainings_svc.card(training, taken)}\n\n"
+            f"Записанным ({taken}) уйдёт уведомление.",
+            group(Choice("Подтвердить", f"atr:cancel_confirm:{training.id}", style="danger", emoji="fire"),
+                  Choice("Назад", f"atr:view:{training.id}", emoji="arrow_left"),
+                  MENU),
+        ),
         data={"screen": "admin_training", "offset": s.data.get("offset", 0),
               "weekday": s.data.get("weekday", 0), "training_id": training.id},
     )
@@ -265,26 +233,22 @@ async def show_attendance(ctx: BotContext, session: AsyncSession, s: UserSession
     people = await trainings_svc.participants(session, training_id)
     text = (
         f"✅ <b>Посещаемость</b>\n{training.title} — {fmt_dt(training.starts_at)}\n\n"
-        "Тыкай по студенту реакцией, чтобы переключить отметку:\n"
+        "Тыкай по студенту кнопкой, чтобы переключить отметку:\n"
         "❔ нет → ✅ был → ❌ не пришёл → ➖ уважительно\n\n"
         "❌ добавляет пропуск, остальные отметки — снимают."
     )
     if not people:
         text += "\n\nНикто не записывался."
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, b in enumerate(people, 1):
-        name, _ = R.number(i)
-        reactions[name] = f"att:toggle:{b.id}"
-        legend.append((i, f"{ATTENDANCE_ICONS[b.attendance]} {b.student.display_name}"))
-    if legend:
-        text += "\n\n" + _legend(legend)
-    reactions["arrow_left"] = f"atr:view:{training_id}"
-    reactions["no_entry"] = "adm:menu"
+    choices: list[Choice] = [
+        Choice(f"{ATTENDANCE_ICONS[b.attendance]} {b.student.display_name}", f"att:toggle:{b.id}")
+        for b in people
+    ]
+    choices.append(Choice("Назад", f"atr:view:{training_id}", emoji="arrow_left"))
+    choices.append(MENU)
     offset = s.data.get("offset", 0)
     weekday = s.data.get("weekday", 0)
-    await ctx.send(
-        s.user_id, text, reactions=reactions,
+    await ctx.show(
+        s.user_id, screen(text, group(*choices)),
         data={"screen": "attendance", "offset": offset, "weekday": weekday, "training_id": training_id},
     )
 
@@ -313,9 +277,9 @@ async def attendance_toggle(ctx: BotContext, session: AsyncSession, s: UserSessi
 # ---------- создание тренировки (FSM) ----------
 
 async def new_training_start(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin) -> None:
-    await ctx.send(
-        s.user_id, "➕ <b>Новая тренировка</b>\n\nШаг 1/7. Название?",
-        reactions={"x": "fsm:cancel"}, fsm="new_training.title", fsm_data={},
+    await ctx.show(
+        s.user_id, screen("➕ <b>Новая тренировка</b>\n\nШаг 1/7. Название?", group(CANCEL)),
+        fsm="new_training.title", fsm_data={},
         data={"screen": "admin_new_training"},
     )
 
@@ -402,9 +366,9 @@ async def _new_training_step(ctx: BotContext, session: AsyncSession, s: UserSess
 
 
 async def _advance_new_training(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin, step: str) -> None:
-    await ctx.send(
-        s.user_id, _NEW_PROMPTS[step],
-        reactions={"x": "fsm:cancel"}, fsm=step,
+    await ctx.show(
+        s.user_id, screen(_NEW_PROMPTS[step], group(CANCEL)),
+        fsm=step,
         data=s.data,
     )
 
@@ -412,9 +376,9 @@ async def _advance_new_training(ctx: BotContext, session: AsyncSession, s: UserS
 # ---------- студенты ----------
 
 async def find_student_start(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin) -> None:
-    await ctx.send(
-        s.user_id, "🔎 Пришли часть имени, @username или email — найду студента.",
-        reactions={"x": "fsm:cancel"}, fsm="find_student",
+    await ctx.show(
+        s.user_id, screen("🔎 Пришли часть имени, @username или email — найду студента.", group(CANCEL)),
+        fsm="find_student",
     )
 
 
@@ -432,26 +396,21 @@ async def banned_students(ctx: BotContext, session: AsyncSession, s: UserSession
 
 async def _show_students_list(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin, students: list[Student], header: str) -> None:
     if not students:
-        await ctx.send(
-            s.user_id, header,
-            reactions={"arrow_left": "adm:menu"},
+        await ctx.show(
+            s.user_id, screen(header, group(MENU)),
             data={"screen": "admin_menu"},
         )
         return
     lines = [header, ""]
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, st in enumerate(students[:9], 1):
+    choices: list[Choice] = []
+    for st in students[:9]:
         mark = "🚫" if st.is_banned else "👤"
         lines.append(f"{mark} {st.display_name} · пропусков {st.no_show_count}")
-        name, _ = R.number(i)
-        reactions[name] = f"ast:view:{st.id}"
-        legend.append((i, st.display_name))
-    lines += ["", "Выбери студента реакцией 👇"]
-    lines.append(_legend(legend))
-    reactions["arrow_left"] = "adm:menu"
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+        choices.append(Choice(st.display_name, f"ast:view:{st.id}"))
+    lines += ["", "Выбери студента 👇"]
+    choices.append(MENU)
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "admin_students"},
     )
 
@@ -477,17 +436,17 @@ async def show_student(ctx: BotContext, session: AsyncSession, s: UserSession, a
         lines.append("\n<b>Записан на:</b>")
         lines += [f"• {fmt_short(b.training.starts_at)} — {b.training.title}" for b in active]
 
-    reactions: dict[str, str] = {}
+    choices: list[Choice] = []
     if student.is_banned:
-        reactions["white_check_mark"] = f"ast:unban:{student.id}"
+        choices.append(Choice("Разблокировать", f"ast:unban:{student.id}", emoji="white_check_mark"))
     else:
-        reactions["no_entry"] = f"ast:ban:{student.id}"
+        choices.append(Choice("Заблокировать", f"ast:ban:{student.id}", style="danger", emoji="no_entry"))
     if student.no_show_count:
-        reactions["memo"] = f"ast:reset:{student.id}"
-    reactions["arrow_left"] = "adm:menu"
+        choices.append(Choice("Сбросить пропуски", f"ast:reset:{student.id}", emoji="memo"))
+    choices.append(MENU)
 
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "admin_student", "student_id": student.id},
     )
 
@@ -541,9 +500,8 @@ async def show_stats(ctx: BotContext, session: AsyncSession, s: UserSession, adm
         lines += ["", "<b>Последние тренировки</b> (записалось / пришло / пропустили)"]
         for t, booked, att, no_show in per:
             lines.append(f"• {fmt_short(t.starts_at)} {t.title}: {booked} / {att} / {no_show}")
-    await ctx.send(
-        s.user_id, "\n".join(lines),
-        reactions={"arrow_left": "adm:menu"},
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(MENU)),
         data={"screen": "admin_stats"},
     )
 
@@ -553,9 +511,8 @@ async def export_csv(ctx: BotContext, session: AsyncSession, s: UserSession, adm
     channel = await ctx.dm(s.user_id)
     file_id = await ctx.mm.upload_file(channel, "bookings.csv", payload)
     await ctx.mm.create_post(channel, "Все записи: тренировка, студент, статус, посещаемость.", file_ids=[file_id])
-    await ctx.send(
-        s.user_id, "📤 Файл отправлен выше.",
-        reactions={"arrow_left": "adm:menu"},
+    await ctx.show(
+        s.user_id, screen("📤 Файл отправлен выше.", group(MENU)),
         data={"screen": "admin_stats"},
     )
 
@@ -571,20 +528,22 @@ async def export_schedule(ctx: BotContext, session: AsyncSession, s: UserSession
         "Поправь и загрузи обратно через «📥 Загрузить расписание».",
         file_ids=[file_id],
     )
-    await ctx.send(
-        s.user_id, "🗓 Файл отправлен выше.",
-        reactions={"arrow_left": "adm:menu"},
+    await ctx.show(
+        s.user_id, screen("🗓 Файл отправлен выше.", group(MENU)),
         data={"screen": "admin_stats"},
     )
 
 
 async def import_schedule_start(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin) -> None:
-    await ctx.send(
+    await ctx.show(
         s.user_id,
-        "📥 <b>Загрузка расписания</b>\n\n"
-        "Пришли .xlsx-файл в том же виде, что отдаёт «🗓 Выгрузить расписание».\n"
-        "Покажу, что получится, до того как что-то менять.",
-        reactions={"x": "fsm:cancel"}, fsm="import.waiting_file",
+        screen(
+            "📥 <b>Загрузка расписания</b>\n\n"
+            "Пришли .xlsx-файл в том же виде, что отдаёт «🗓 Выгрузить расписание».\n"
+            "Покажу, что получится, до того как что-то менять.",
+            group(CANCEL),
+        ),
+        fsm="import.waiting_file",
         data={"screen": "admin_import"},
     )
 
@@ -636,9 +595,11 @@ async def _import_file(ctx: BotContext, session: AsyncSession, s: UserSession, a
         lines.append(f"Прошедших внутри периода не тронем: {result.kept_past}")
     if result.notify:
         lines.append(f"⚠️ Записей у студентов слетит: <b>{len(result.notify)}</b> — их предупредим.")
-    await ctx.send(
-        s.user_id, "\n".join(lines),
-        reactions={"fire": "adm:import_apply", "x": "fsm:cancel"},
+    await ctx.show(
+        s.user_id, screen(
+            "\n".join(lines),
+            group(Choice("Применить", "adm:import_apply", style="danger", emoji="fire"), CANCEL),
+        ),
         fsm="import.confirm",
         data={"screen": "admin_import"},
     )
@@ -677,9 +638,8 @@ async def import_schedule_apply(ctx: BotContext, session: AsyncSession, s: UserS
     ]
     if result.notify:
         lines.append(f"Предупреждено студентов: {notified} из {len(result.notify)}")
-    await ctx.send(
-        s.user_id, "\n".join(lines),
-        reactions={"arrow_left": "adm:menu"},
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(MENU)),
         data={"screen": "admin_stats"},
     )
 
@@ -690,23 +650,17 @@ async def show_admins(ctx: BotContext, session: AsyncSession, s: UserSession, ad
     items = await students_svc.list_admins(session)
     lines = ["🛡 <b>Админы</b>", "", "👑 — суперадмин из .env (снять нельзя).",
              "Новый админ добавляется по корпоративной почте."]
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, a in enumerate(items, 1):
+    choices: list[Choice] = []
+    for a in items:
         label = a.email or a.mm_username or "?"
         lines.append(f"{'👑' if a.is_superadmin else '🛡'} {label}")
         if not a.is_superadmin and admin.is_superadmin:
-            name, _ = R.number(i)
-            reactions[name] = f"adm:del_admin:{a.id}"
-            legend.append((i, f"снять {label}"))
+            choices.append(Choice(f"Снять: {label}", f"adm:del_admin:{a.id}"))
     if admin.is_superadmin:
-        reactions["heavy_plus_sign"] = "adm:add_admin"
-    if legend:
-        lines += ["", "Снять админа реакцией:"]
-        lines.append(_legend(legend))
-    reactions["arrow_left"] = "adm:menu"
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+        choices.append(Choice("Добавить админа", "adm:add_admin", emoji="heavy_plus_sign"))
+    choices.append(Choice("Назад", "nav:schedule", emoji="arrow_left"))
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "admin_admins"},
     )
 
@@ -715,9 +669,9 @@ async def add_admin_start(ctx: BotContext, session: AsyncSession, s: UserSession
     if not admin.is_superadmin:
         await ctx.notify(s.user_id, "Только суперадмин может добавлять админов.")
         return
-    await ctx.send(
-        s.user_id, "Пришли корпоративную почту нового админа.",
-        reactions={"x": "fsm:cancel"}, fsm="add_admin",
+    await ctx.show(
+        s.user_id, screen("Пришли корпоративную почту нового админа.", group(CANCEL)),
+        fsm="add_admin",
     )
 
 
@@ -765,8 +719,8 @@ async def handle_fsm_post(ctx: BotContext, session: AsyncSession, s: UserSession
         await _import_file(ctx, session, s, admin, file_ids, text)
         return
     if step == "import.confirm":
-        # ждали реакцию подтверждения — текст игнорируем
-        await ctx.notify(s.user_id, "Нажми 🔥 для подтверждения или ❌ для отмены.")
+        # ждали нажатия кнопки подтверждения — текст игнорируем
+        await ctx.notify(s.user_id, "Нажми «Применить» для подтверждения или «Отмена».")
         return
     # неизвестный шаг — выходим из FSM
     s.fsm = ""

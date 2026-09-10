@@ -60,6 +60,14 @@ def screen(text: str, *groups: Iterable[Choice], image: bytes | None = None,
     )
 
 
+# Часто встречающиеся кнопки навигации.
+CANCEL = Choice("Отмена", "fsm:cancel", style=DANGER, emoji="x")
+MENU = Choice("В меню", "adm:menu", emoji="no_entry")
+MY = Choice("Мои записи", "nav:my", emoji="ticket")
+HELP = Choice("Помощь", "nav:help", emoji="information_source")
+ADMIN = Choice("Админка", "nav:admin", emoji="wrench")
+
+
 # ---------------------------------------------------------------- кнопки
 
 def build_props(scr: Screen, action_url: str) -> dict[str, Any]:

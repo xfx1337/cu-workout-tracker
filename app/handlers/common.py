@@ -4,12 +4,13 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import reactions, texts
+from app import texts
 from app.config import settings
 from app.mm.client import MMUser
 from app.models import Admin, Student
 from app.runtime import BotContext, UserSession
 from app.services import students as students_svc
+from app.ui import ADMIN, HELP, MY, Choice, group, screen
 
 log = logging.getLogger(__name__)
 
@@ -32,9 +33,9 @@ def help_text(is_admin: bool) -> str:
         "",
         "На картинке — расписание на неделю. Прямо на карточке видно, "
         "сколько мест осталось и записан ли ты.",
-        "Под картинкой — реакции-«кнопки»: номер дня недели, ←/→ для соседних недель.",
+        "Под картинкой — кнопки: день недели, ←/→ для соседних недель.",
         "",
-        "Жми реакцию на сообщении, чтобы выбрать день и записаться.",
+        "Жми кнопку, чтобы выбрать день и записаться.",
         "",
         f"⏰ За {settings.reminder_minutes_before} мин до начала придёт напоминание.",
         "После тренировки бот спросит, получилось ли прийти.",
@@ -43,29 +44,27 @@ def help_text(is_admin: bool) -> str:
         "доступ к записи закроется. Отменяй заранее — это бесплатно и никак не наказывается.",
     ]
     if is_admin:
-        lines += ["", "🛠 У тебя есть доступ к админке — напиши «админка» или нажми 🛠."]
+        lines += ["", "🛠 У тебя есть доступ к админке — напиши «админка» или нажми кнопку «Админка»."]
     return "\n".join(lines)
 
 
 async def show_help(ctx: BotContext, session: AsyncSession, s: UserSession, admin: Admin | None, offset: int = 0) -> None:
-    reactions = {
-        "arrow_left": "nav:schedule",
-        "ticket": "nav:my",
-    }
+    choices = [Choice("Назад", "nav:schedule", emoji="arrow_left"), MY, HELP]
     if admin:
-        reactions["wrench"] = "nav:admin"
-    await ctx.send(
-        s.user_id, help_text(bool(admin)),
-        reactions=reactions,
+        choices.append(ADMIN)
+    await ctx.show(
+        s.user_id, screen(help_text(bool(admin)), group(*choices)),
         data={"screen": "help", "offset": offset},
     )
 
 
 async def show_consent(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student) -> None:
-    await ctx.send(
+    await ctx.show(
         s.user_id,
-        f"{texts.CONSENT}\n\nНажми ✅, чтобы подтвердить.",
-        reactions={"white_check_mark": "consent:accept"},
+        screen(
+            f"{texts.CONSENT}\n\nНажми кнопку «Подтверждаю», чтобы дать согласие.",
+            group(Choice("Подтверждаю", "consent:accept", emoji="white_check_mark")),
+        ),
         data={"screen": "consent"},
     )
 

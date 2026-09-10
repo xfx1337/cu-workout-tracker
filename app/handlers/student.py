@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import reactions as R
 from app import texts
 from app.config import settings
 from app.models import Admin, Attendance, Booking, BookingStatus, Student, Training
@@ -18,6 +17,7 @@ from app.services.bookings import BookResult, CancelResult
 from app.tz import (
     MONTHS_RU, WEEKDAYS_RU, fmt_short, now_utc, to_local, week_offset_of, week_start,
 )
+from app.ui import ADMIN, HELP, MY, Choice, group, screen
 
 log = logging.getLogger(__name__)
 
@@ -43,10 +43,6 @@ async def _gate(ctx: BotContext, s: UserSession, student: Student) -> bool:
     return True
 
 
-def _legend(pairs: list[tuple[int, str]]) -> str:
-    return "  ".join(f"{R.symbol(name)} {label}" for name, label in pairs)
-
-
 # ---------- недельная сетка картинкой ----------
 
 async def open_schedule(
@@ -61,7 +57,7 @@ async def open_schedule(
 
     caption = (
         f"<b>Расписание</b> · {week_title(monday, monday + timedelta(days=6))}\n"
-        "Выбери день недели реакцией 👇"
+        "Выбери день недели 👇"
     )
     if not items:
         caption = f"<b>{week_title(monday, monday + timedelta(days=6))}</b>\nНа эту неделю занятий нет."
@@ -79,30 +75,17 @@ async def open_schedule(
         await trainings_svc.for_week(session, week_start(offset + 1))
     )
 
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, weekday in enumerate(days, 1):
-        name, _ = R.number(i)
-        reactions[name] = f"wk:day:{weekday}"
-        legend.append((i, WEEKDAYS_RU[weekday]))
+    day_choices = [Choice(WEEKDAYS_RU[weekday], f"wk:day:{weekday}") for weekday in days]
+    nav: list[Choice] = [MY, HELP]
     if offset > 0:
-        reactions["arrow_left"] = f"wk:week:{offset - 1}"
+        nav.insert(0, Choice("← Прошлая неделя", f"wk:week:{offset - 1}", emoji="arrow_left"))
     if has_next:
-        reactions["arrow_right"] = f"wk:week:{offset + 1}"
-    reactions["ticket"] = "nav:my"
-    reactions["information_source"] = "nav:help"
+        nav.insert(0, Choice("Следующая неделя →", f"wk:week:{offset + 1}", emoji="arrow_right"))
     if admin:
-        reactions["wrench"] = "nav:admin"
+        nav.append(ADMIN)
 
-    if legend:
-        caption += "\n\n" + _legend(legend)
-    if offset > 0 or has_next:
-        caption += "\n← / → — соседние недели"
-
-    await ctx.send(
-        s.user_id, caption,
-        file_bytes=png, filename=f"schedule-{monday}.png",
-        reactions=reactions,
+    await ctx.show(
+        s.user_id, screen(caption, group(*day_choices), group(*nav), image=png, filename=f"schedule-{monday}.png"),
         data={"screen": "week", "offset": offset},
     )
 
@@ -116,9 +99,8 @@ async def show_day(ctx: BotContext, session: AsyncSession, s: UserSession, stude
     lines = [f"<b>{WEEKDAYS_RU[weekday]}, {day.day} {MONTHS_RU[day.month - 1]}</b>", ""]
     if not items:
         lines.append("В этот день занятий нет.")
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, t in enumerate(items, 1):
+    choices: list[Choice] = []
+    for t in items:
         free = max(t.capacity - taken.get(t.id, 0), 0)
         if t.id in booked_ids:
             note = "ты записан"
@@ -129,17 +111,13 @@ async def show_day(ctx: BotContext, session: AsyncSession, s: UserSession, stude
         who = f" · {t.instructor}" if t.instructor else ""
         start = to_local(t.starts_at)
         lines.append(f"<b>{start:%H:%M}</b> {t.title}{who} — {note}")
-        name, _ = R.number(i)
-        reactions[name] = f"tr:view:{t.id}"
-        legend.append((i, f"{start:%H:%M} {t.title}"))
+        choices.append(Choice(f"{start:%H:%M} {t.title}", f"tr:view:{t.id}"))
 
-    lines += ["", "Выбери тренировку реакцией 👇"]
-    if legend:
-        lines.append(_legend(legend))
-    reactions["arrow_left"] = "nav:schedule"
+    lines += ["", "Выбери тренировку 👇"]
+    choices.append(Choice("Назад", "nav:schedule", emoji="arrow_left"))
 
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "day", "offset": offset, "weekday": weekday},
     )
 
@@ -161,19 +139,20 @@ async def show_training(ctx: BotContext, session: AsyncSession, s: UserSession, 
 
     offset = s.data.get("offset", 0)
     weekday = s.data.get("weekday", -1)
-    reactions: dict[str, str] = {}
+    choices: list[Choice] = []
     if not training.is_cancelled:
-        action = "cancel" if is_booked else "book"
-        reactions["x" if is_booked else "heavy_plus_sign"] = f"tr:{action}:{training.id}"
+        if is_booked:
+            choices.append(Choice("Отменить запись", f"tr:cancel:{training.id}", style="danger", emoji="x"))
+        else:
+            choices.append(Choice("Записаться", f"tr:book:{training.id}", style="primary", emoji="heavy_plus_sign"))
     if weekday >= 0:
-        reactions["arrow_left"] = f"wk:day:{weekday}"
+        choices.append(Choice("Назад", f"wk:day:{weekday}", emoji="arrow_left"))
     else:
-        reactions["arrow_left"] = "nav:schedule"
-    reactions["ticket"] = "nav:my"
-    reactions["information_source"] = "nav:help"
+        choices.append(Choice("Назад", "nav:schedule", emoji="arrow_left"))
+    choices += [MY, HELP]
 
-    await ctx.send(
-        s.user_id, text, reactions=reactions,
+    await ctx.show(
+        s.user_id, screen(text, group(*choices)),
         data={"screen": "training", "offset": offset, "weekday": weekday, "training_id": training.id},
     )
 
@@ -181,24 +160,23 @@ async def show_training(ctx: BotContext, session: AsyncSession, s: UserSession, 
 async def _text_schedule(ctx: BotContext, session: AsyncSession, s: UserSession, student: Student) -> None:
     items = await trainings_svc.upcoming(session)
     if not items:
-        await ctx.send(s.user_id, texts.NO_TRAININGS, reactions={"information_source": "nav:help"})
+        await ctx.show(
+            s.user_id, screen(texts.NO_TRAININGS, group(HELP)),
+            data={"screen": "help"},
+        )
         return
     taken = await trainings_svc.taken_map(session, [t.id for t in items])
     booked_ids = {b.training_id for b in await bookings_svc.active_for_student(session, student.id)}
     lines = ["<b>Ближайшие тренировки</b>", ""]
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, t in enumerate(items[:9], 1):
+    choices: list[Choice] = []
+    for t in items[:9]:
         free = max(t.capacity - taken.get(t.id, 0), 0)
         mark = "✅" if t.id in booked_ids else ("🔴" if free == 0 else "🟢")
         lines.append(f"{mark} {fmt_short(t.starts_at)} · {t.title} · {taken.get(t.id, 0)}/{t.capacity}")
-        name, _ = R.number(i)
-        reactions[name] = f"tr:view:{t.id}"
-        legend.append((i, fmt_short(t.starts_at)))
-    lines += ["", "Нажми номер тренировки:"]
-    lines.append(_legend(legend))
-    reactions["information_source"] = "nav:help"
-    await ctx.send(s.user_id, "\n".join(lines), reactions=reactions)
+        choices.append(Choice(fmt_short(t.starts_at), f"tr:view:{t.id}"))
+    lines += ["", "Нажми тренировку:"]
+    choices.append(HELP)
+    await ctx.show(s.user_id, screen("\n".join(lines), group(*choices)))
 
 
 # ---------- запись и отмена ----------
@@ -259,7 +237,7 @@ async def my_bookings(ctx: BotContext, session: AsyncSession, s: UserSession, st
         lines.append(texts.NO_BOOKINGS)
     else:
         for i, b in enumerate(active, 1):
-            lines.append(f"{R.symbol(R.number(i)[0])} {fmt_short(b.training.starts_at)} — {b.training.title}")
+            lines.append(f"{i}. {fmt_short(b.training.starts_at)} — {b.training.title}")
 
     history = await bookings_svc.history_for_student(session, student.id, limit=5)
     if history:
@@ -274,22 +252,17 @@ async def my_bookings(ctx: BotContext, session: AsyncSession, s: UserSession, st
     if student.no_show_count:
         lines += ["", f"⚠️ Пропусков без отмены: {student.no_show_count} из {settings.no_show_limit}"]
 
-    reactions: dict[str, str] = {}
-    legend: list[tuple[int, str]] = []
-    for i, b in enumerate(active, 1):
-        name, _ = R.number(i)
-        reactions[name] = f"tr:cancel:{b.training_id}"
-        legend.append((i, f"отменить: {b.training.title}"))
-    reactions["arrow_left"] = "nav:schedule"
-    reactions["information_source"] = "nav:help"
+    choices: list[Choice] = [Choice(f"Отменить: {b.training.title}", f"tr:cancel:{b.training_id}")
+                             for b in active]
+    choices.append(Choice("Назад", "nav:schedule", emoji="arrow_left"))
+    choices += [HELP]
     if admin:
-        reactions["wrench"] = "nav:admin"
-    if legend:
-        lines += ["", "Отменить запись реакцией:"]
-        lines.append(_legend(legend))
+        choices.append(ADMIN)
+    if active:
+        lines += ["", "Можно отменить запись:"]
 
-    await ctx.send(
-        s.user_id, "\n".join(lines), reactions=reactions,
+    await ctx.show(
+        s.user_id, screen("\n".join(lines), group(*choices)),
         data={"screen": "my", "offset": offset},
     )
 

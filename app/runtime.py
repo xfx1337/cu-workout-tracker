@@ -13,7 +13,7 @@ from typing import Any
 from app.actions_server import ActionRegistry
 from app.config import settings
 from app.mm.client import MattermostClient, MattermostError, MMUser
-from app.ui import Screen, build_props, build_reactions
+from app.ui import Choice, Screen, build_props, build_reactions, group, screen
 
 log = logging.getLogger(__name__)
 
@@ -209,18 +209,18 @@ class Notifier:
 
     async def send_reminder(self, mm_user_id: str, text: str, training_id: int) -> None:
         # на напоминалке — кнопка «не смогу прийти»
-        await self.ctx.send(
-            mm_user_id, text,
-            reactions={"x": f"tr:cancel:{training_id}"},
+        await self.ctx.show(
+            mm_user_id,
+            screen(text, group(Choice("Не смогу прийти", f"tr:cancel:{training_id}", style="danger", emoji="x"))),
             data={"screen": "reminder"},
         )
 
     async def send_poll(self, mm_user_id: str, text: str, booking_id: int) -> None:
-        await self.ctx.send(
-            mm_user_id, text,
-            reactions={
-                "white_check_mark": f"poll:yes:{booking_id}",
-                "x": f"poll:no:{booking_id}",
-            },
+        await self.ctx.show(
+            mm_user_id,
+            screen(text, group(
+                Choice("Был(а)", f"poll:yes:{booking_id}", emoji="white_check_mark"),
+                Choice("Не получилось", f"poll:no:{booking_id}", emoji="x"),
+            )),
             data={"screen": "poll"},
         )
