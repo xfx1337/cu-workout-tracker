@@ -17,6 +17,9 @@ DB_PATH = os.path.join(tempfile.mkdtemp(prefix="cu-dispatch-"), "smoke.db")
 os.environ["DATABASE_URL"] = os.getenv("SMOKE_DATABASE_URL") or f"sqlite+aiosqlite:///{DB_PATH}"
 os.environ["ADMIN_EMAILS"] = "boss@cu.local"
 os.environ["NO_SHOW_LIMIT"] = "3"
+# Режим отрисовки фиксируем явно, иначе тест зависел бы от .env разработчика:
+# с MM_PUBLIC_URL экраны рисуются кнопками, без него — реакциями.
+os.environ["MM_PUBLIC_URL"] = "http://bot.test"
 
 from app.db import SessionMaker, init_db  # noqa: E402
 from app.handlers import admin as admin_h  # noqa: E402
@@ -71,8 +74,23 @@ class FakeMM:
 
         post = MMPost(id=f"p{len(self.posts)}", channel_id=channel_id, user_id=self.me.id,
                       message=message, file_ids=file_ids or [])
-        self.posts.append({"id": post.id, "message": message, "files": post.file_ids})
+        self.posts.append({"id": post.id, "channel_id": channel_id, "message": message,
+                           "files": post.file_ids, "props": kw.get("props") or {}})
         return post
+
+    async def update_post(self, post_id: str, message: str, file_ids=None, props=None) -> object:
+        """В режиме кнопок экран правится на месте — заглушка обязана это уметь."""
+        from app.mm.client import MMPost
+
+        for stored in self.posts:
+            if stored["id"] == post_id:
+                stored["message"] = message
+                stored["files"] = file_ids or []
+                stored["props"] = props or {}
+                return MMPost(id=post_id, channel_id=stored.get("channel_id", ""),
+                              user_id=self.me.id, message=message,
+                              props=props or {}, file_ids=file_ids or [])
+        raise AssertionError(f"правка несуществующего поста {post_id}")
 
     async def upload_file(self, channel_id: str, filename: str, data: bytes) -> str:
         return f"f-{filename}"
@@ -103,11 +121,14 @@ async def make_student(session, user: MMUser):
 
 
 def action_for(s, action: str) -> str:
-    """Возвращает эмодзи, который на активном экране соответствует действию."""
-    for emoji, act in s.reactions.items():
-        if act == action:
-            return emoji
-    raise AssertionError(f"нет реакции для {action!r}, есть: {s.reactions}")
+    """Убеждается, что действие есть на активном экране, и возвращает его.
+
+    Проверяем по s.actions, а не по эмодзи: экран может быть отрисован
+    кнопками или реакциями, а набор действий у него один и тот же.
+    """
+    if action not in s.actions:
+        raise AssertionError(f"нет действия {action!r} на экране, есть: {sorted(s.actions)}")
+    return action
 
 
 async def main() -> int:

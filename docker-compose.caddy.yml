@@ -1,0 +1,29 @@
+# Обратный прокси с автоматическим HTTPS для ручки кнопок.
+#
+# Нужен, только если на сервере ещё НЕТ своего nginx/Caddy. Если прокси уже
+# есть — этот файл не подключай, просто направь его на 127.0.0.1:MM_LISTEN_PORT.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+#
+# В .env понадобится BOT_DOMAIN (например workout.example.ru), а домен должен
+# A-записью смотреть на этот сервер — иначе Let's Encrypt не выпустит сертификат.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      BOT_DOMAIN: ${BOT_DOMAIN:?нужно задать BOT_DOMAIN в .env}
+      BOT_PORT: ${MM_LISTEN_PORT:-8080}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:

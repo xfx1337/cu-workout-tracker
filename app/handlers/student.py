@@ -7,16 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import texts
 from app.config import settings
-from app.models import Admin, Attendance, Booking, BookingStatus, Student, Training
+from app.models import Admin, Attendance, Booking, BookingStatus, Student
 from app.render import plural_ru, render_week, week_title
 from app.runtime import BotContext, UserSession
 from app.services import bookings as bookings_svc
 from app.services import enforcement
 from app.services import trainings as trainings_svc
 from app.services.bookings import BookResult, CancelResult
-from app.tz import (
-    MONTHS_RU, WEEKDAYS_RU, fmt_short, now_utc, to_local, week_offset_of, week_start,
-)
+from app.tz import MONTHS_RU, WEEKDAYS_RU, fmt_short, to_local, week_start
 from app.ui import ADMIN, HELP, MY, Choice, group, screen
 
 log = logging.getLogger(__name__)

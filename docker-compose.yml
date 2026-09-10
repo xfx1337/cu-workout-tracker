@@ -20,16 +20,30 @@ services:
     restart: unless-stopped
 
   bot:
+    # BOT_IMAGE подставляет CI (тег коммита), локально собирается из исходников
+    image: ${BOT_IMAGE:-cu-workout-tracker-bot:local}
     build: .
     env_file: .env
     environment:
       # перебивает DATABASE_URL из .env: внутри compose база всегда своя
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-workout}:${POSTGRES_PASSWORD:-workout}@db:5432/${POSTGRES_DB:-workout}
       TZ: ${TZ_NAME:-Europe/Moscow}
+    # Ручка для кнопок Mattermost. Слушаем только на localhost: наружу её
+    # выставляет обратный прокси с HTTPS (см. docker-compose.caddy.yml или
+    # свой nginx/Caddy на хосте). Публиковать её на 0.0.0.0 без TLS нельзя —
+    # по ней ходят клики пользователей.
+    ports:
+      - "127.0.0.1:${MM_LISTEN_PORT:-8080}:${MM_LISTEN_PORT:-8080}"
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request,sys; p=os.getenv('MM_LISTEN_PORT','8080'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   pgdata:

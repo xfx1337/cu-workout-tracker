@@ -31,6 +31,9 @@ class UserSession:
     user_id: str
     active_post_id: str = ""
     reactions: dict[str, str] = field(default_factory=dict)
+    # действия активного экрана — заполняются в обоих режимах (кнопки и реакции),
+    # поэтому по ним можно проверять экран, не зная, чем он отрисован
+    actions: set[str] = field(default_factory=set)
     fsm: str = ""
     fsm_data: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
@@ -175,6 +178,7 @@ class BotContext:
 
         s.active_post_id = post.id
         s.reactions = mapping
+        s.actions = {c.action for c in scr.choices}
         s.fsm = fsm
         if fsm_data is not None:
             s.fsm_data = fsm_data

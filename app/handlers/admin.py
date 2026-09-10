@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 from datetime import datetime, timedelta
 
@@ -8,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import texts
 from app.config import settings
-from app.models import Admin, Attendance, Booking, Student, Training
+from app.models import Admin, Attendance, Booking, Student
 from app.render import render_week, week_title
 from app.runtime import BotContext, UserSession
 from app.services import bookings as bookings_svc
@@ -18,8 +17,7 @@ from app.services import stats as stats_svc
 from app.services import students as students_svc
 from app.services import trainings as trainings_svc
 from app.tz import (
-    MONTHS_RU, WEEKDAYS_RU, fmt_dt, fmt_short, now_utc, parse_local, to_local,
-    week_offset_of, week_start,
+    MONTHS_RU, WEEKDAYS_RU, fmt_dt, fmt_short, now_utc, parse_local, to_local, week_start,
 )
 from app.ui import CANCEL, MENU, Choice, group, screen
 
@@ -169,7 +167,7 @@ async def show_people(ctx: BotContext, session: AsyncSession, s: UserSession, ad
         lines.append("Пока никто не записался.")
     for i, b in enumerate(people, 1):
         st = b.student
-        extra = f" · {st.external_student_id}" if getattr(st, "external_student_id", None) else ""
+        extra = f" · {st.email}" if st.email else ""
         lines.append(f"{i}. {st.display_name}{extra}")
     lines.append("")
     lines.append(f"Всего: {len(people)}/{training.capacity}")
@@ -221,7 +219,6 @@ async def cancel_training_do(ctx: BotContext, session: AsyncSession, s: UserSess
         except Exception as exc:
             log.info("cannot notify %s: %s", student.mm_user_id, exc)
 
-    taken = await trainings_svc.taken(session, training.id)
     await ctx.notify(s.user_id, f"❌ Отменено. Уведомлено студентов: {sent}.")
     await show_admin_training(ctx, session, s, training.id)
 

@@ -1,0 +1,113 @@
+# Сборка и выкладка бота записи на тренировки.
+#
+# Два этапа: тесты гоняются на любой ветке, деплой — только с mattermost.
+# Образ собирается в registry GitLab, на сервер уезжает не код, а готовый образ:
+# сервер только логинится в registry и перезапускает compose.
+#
+# Что должно быть заведено в Settings → CI/CD → Variables:
+#   SSH_PRIVATE_KEY   (type: File, protected)  ключ для входа на сервер
+#   SSH_KNOWN_HOSTS   (type: File, protected)  вывод `ssh-keyscan <сервер>`
+#   DEPLOY_HOST       например deploy@10.0.0.5
+#   DEPLOY_PATH       например /opt/cu-workout-tracker
+# Секреты бота (MM_TOKEN и прочее) в переменные CI не кладём: они живут
+# в .env на самом сервере и в git не попадают.
+
+stages: [test, build, deploy]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE/bot
+  DOCKER_DRIVER: overlay2
+
+# ---------------------------------------------------------------- тесты
+
+.python: &python
+  image: python:3.11-slim
+  before_script:
+    # fonts-dejavu-core нужен app/render.py: без кириллического шрифта
+    # картинка расписания не соберётся и тесты отрисовки упадут
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends fonts-dejavu-core
+    - pip install -q -r requirements.txt
+
+тесты:домен:
+  <<: *python
+  stage: test
+  script:
+    - python -m tests.smoke
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+тесты:диспетчер:
+  <<: *python
+  stage: test
+  script:
+    - python -m tests.test_dispatch
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# Те же тесты на боевом движке: SQLite и Postgres расходятся в мелочах
+# (время по умолчанию, блокировки строк), и ловить это лучше в CI.
+тесты:postgres:
+  <<: *python
+  stage: test
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: workout
+    POSTGRES_PASSWORD: workout
+    POSTGRES_DB: workout_test
+    SMOKE_DATABASE_URL: postgresql+asyncpg://workout:workout@postgres:5432/workout_test
+  script:
+    - python -m tests.smoke
+  rules:
+    - if: $CI_COMMIT_BRANCH == "mattermost"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------- сборка
+
+сборка:образа:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$IMAGE:$CI_COMMIT_SHORT_SHA" -t "$IMAGE:latest" .
+    - docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$IMAGE:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "mattermost"
+
+# ---------------------------------------------------------------- выкладка
+
+выкладка:
+  stage: deploy
+  image: alpine:3.20
+  environment:
+    name: production
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - chmod 600 "$SSH_PRIVATE_KEY" && ssh-add "$SSH_PRIVATE_KEY"
+    - mkdir -p ~/.ssh && cp "$SSH_KNOWN_HOSTS" ~/.ssh/known_hosts
+  script:
+    # Тег коммита, а не latest: так видно, что именно развёрнуто, и можно
+    # откатиться, поставив предыдущий SHA в .env на сервере.
+    - |
+      ssh "$DEPLOY_HOST" "
+        set -e
+        cd '$DEPLOY_PATH'
+        echo '$CI_REGISTRY_PASSWORD' | docker login -u '$CI_REGISTRY_USER' --password-stdin '$CI_REGISTRY'
+        sed -i 's|^BOT_IMAGE=.*|BOT_IMAGE=$IMAGE:$CI_COMMIT_SHORT_SHA|' .env || echo 'BOT_IMAGE=$IMAGE:$CI_COMMIT_SHORT_SHA' >> .env
+        docker compose pull bot
+        docker compose up -d bot
+        docker image prune -f
+      "
+    # Проверяем, что бот действительно поднялся, а не упал через две секунды
+    - sleep 10
+    - ssh "$DEPLOY_HOST" "cd '$DEPLOY_PATH' && docker compose ps bot && docker compose logs bot --tail 30"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "mattermost"
+      when: manual        # выкладка руками: одно нажатие в интерфейсе GitLab
+      allow_failure: false

@@ -1,0 +1,19 @@
+# Caddy сам получает и продлевает сертификат Let's Encrypt для BOT_DOMAIN.
+{$BOT_DOMAIN} {
+	# Наружу отдаём только то, что нужно Mattermost: приём кликов и проверку живости.
+	# Всё остальное закрыто — за этим адресом нет ни админки, ни API.
+	handle /mm/action/* {
+		reverse_proxy bot:{$BOT_PORT:8080}
+	}
+	handle /health {
+		reverse_proxy bot:{$BOT_PORT:8080}
+	}
+	handle {
+		respond "not found" 404
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
